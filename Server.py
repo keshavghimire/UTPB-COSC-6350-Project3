@@ -8,6 +8,9 @@ PORT = 5555       # Port number
 TIMEOUT = 600     # 10 minutes (in seconds)
 MAX_THREADS = 10  # Maximum number of threads in the pool
 
+# Standard Payload
+payload = "The quick brown fox jumps over the lazy dog."
+
 # Function to handle client connection
 def handle_client(conn, addr):
     conn.settimeout(TIMEOUT)
@@ -35,7 +38,7 @@ def handle_client(conn, addr):
         # Transmit encrypted crumbs to the client
         for crumb_index, crumb in enumerate(crumbs):
             key = keys[crumb]
-            encrypted_crumb = aes_encrypt("some string", key)
+            encrypted_crumb = aes_encrypt(payload, key)  # Use the standard payload here
             conn.sendall(encrypted_crumb)
 
             # Await client progress feedback

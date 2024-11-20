@@ -6,6 +6,9 @@ SERVER_HOST = '127.0.0.1'  # Server IP address
 SERVER_PORT = 5555         # Port number for the TCP connection
 BUFFER_SIZE = 2048         # Size of the buffer for receiving data
 
+# Standard Payload
+expected_payload = "The quick brown fox jumps over the lazy dog."
+
 def decrypt_crumb(crumb_data):
     """
     Attempt to decrypt a crumb using all available keys.
@@ -14,7 +17,7 @@ def decrypt_crumb(crumb_data):
     for crumb, key in keys.items():
         try:
             decrypted_message = aes_decrypt(crumb_data, key)
-            if decrypted_message == "some string":  # Validation string
+            if decrypted_message == expected_payload:  # Validation string
                 return crumb  # Return the 2-bit crumb value
         except Exception:
             continue
