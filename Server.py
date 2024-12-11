@@ -1,79 +1,80 @@
 import socket
-from concurrent.futures import ThreadPoolExecutor
-from Crypto import aes_encrypt, keys, decompose_byte
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import padding
+import os
 
-# Constants
-HOST = '0.0.0.0'  # Listen on all interfaces
-PORT = 5555       # Port number
-TIMEOUT = 600     # 10 minutes (in seconds)
-MAX_THREADS = 10  # Maximum number of threads in the pool
+from Crypto import keys
 
-# Standard Payload
-payload = "The quick brown fox jumps over the lazy dog."
+HOST = '0.0.0.0'
+PORT = 5555
+BUFFER_SIZE = 2048
+PAYLOAD = "The quick brown fox jumps over the lazy dog."
 
-# Function to handle client connection
+
+
+def aes_encrypt(plaintext, key):
+    iv = os.urandom(16)  # Random 16-byte IV
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+
+    padder = padding.PKCS7(128).padder()
+    padded_data = padder.update(plaintext.encode()) + padder.finalize()
+
+    ciphertext = encryptor.update(padded_data) + encryptor.finalize()
+    print(f"[DEBUG] Encrypting: {plaintext}, IV: {iv.hex()}, Ciphertext: {ciphertext.hex()}")
+    return iv + ciphertext  # Concatenate IV and ciphertext
+
+def decompose_byte(byte):
+    return [(byte >> (2 * i)) & 0b11 for i in range(4)]
+
 def handle_client(conn, addr):
-    conn.settimeout(TIMEOUT)
     print(f"[INFO] Connection from {addr} established.")
     try:
-        file_size = 0
         crumbs = []
-
-        # Read and process the file
-        with open("risk.bmp", "rb") as dat_file:
-            dat_file.seek(0, 2)  # Move to end of file to get size
-            file_size = dat_file.tell()
-            dat_file.seek(0)  # Reset pointer to start of file
-
-            # Decompose the file into crumbs (2 bits each)
-            for byte in dat_file.read():
-                crumbs.extend(decompose_byte(byte))
+        for char in PAYLOAD:
+            crumbs.extend(decompose_byte(ord(char)))
 
         total_crumbs = len(crumbs)
         print(f"[INFO] Total crumbs to send: {total_crumbs}")
-
-        # Send total crumbs to the client
         conn.sendall(str(total_crumbs).encode('utf-8'))
 
-        # Transmit encrypted crumbs to the client
-        for crumb_index, crumb in enumerate(crumbs):
-            key = keys[crumb]
-            encrypted_crumb = aes_encrypt(payload, key)  # Use the standard payload here
-            conn.sendall(encrypted_crumb)
+        decrypted_indices = set()
 
-            # Await client progress feedback
-            progress_data = conn.recv(1024).decode('utf-8').strip()
-            if progress_data:
-                print(f"[INFO] Client progress: {progress_data}%")
+        while len(decrypted_indices) < total_crumbs:
+            for crumb_index, crumb in enumerate(crumbs):
+                if crumb_index in decrypted_indices:
+                    continue
 
-        print("[INFO] File transmission complete.")
-    except socket.timeout:
-        print(f"[INFO] Connection from {addr} timed out.")
+                key = keys[crumb]
+                encrypted_crumb = aes_encrypt(str(crumb_index), key)  # Encrypt index
+                print(f"[DEBUG] Encrypting index {crumb_index} as {str(crumb_index)}, Ciphertext: {encrypted_crumb.hex()}")
+                conn.sendall(f"{crumb_index}|{encrypted_crumb.hex()}".encode('utf-8'))
+
+                try:
+                    feedback = conn.recv(BUFFER_SIZE).decode('utf-8').strip()
+                    if feedback.isdigit():
+                        received_index = int(feedback)
+                        if received_index == crumb_index:
+                            decrypted_indices.add(received_index)
+                            print(f"[INFO] Client successfully decrypted crumb index {received_index}.")
+                except Exception as e:
+                    print(f"[ERROR] Error receiving feedback from client: {e}")
     except Exception as e:
         print(f"[ERROR] Error handling client {addr}: {e}")
     finally:
-        # Close the connection
-        try:
-            conn.shutdown(socket.SHUT_RDWR)
-            conn.close()
-        except Exception as e:
-            print(f"[ERROR] Error closing connection from {addr}: {e}")
+        conn.close()
         print(f"[INFO] Connection from {addr} has been closed.")
 
-# Main server function
 def start_server():
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind((HOST, PORT))
-            server_socket.listen()
-            print(f"[INFO] Server started, listening on {PORT}...")
-
-            while True:
-                conn, addr = server_socket.accept()
-                print(f"[INFO] Accepted connection from {addr}.")
-                # Spawn a thread from the pool to handle the connection
-                executor.submit(handle_client, conn, addr)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind((HOST, PORT))
+        server_socket.listen()
+        print(f"[INFO] Server started on port {PORT}.")
+        while True:
+            conn, addr = server_socket.accept()
+            handle_client(conn, addr)
 
 if __name__ == "__main__":
     start_server()
