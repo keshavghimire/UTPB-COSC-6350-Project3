@@ -1,88 +1,105 @@
 import socket
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import padding
+from Crypto import *
+import random
 
-from Crypto import keys
+# Constants
+SERVER_HOST = '127.0.0.1'  # Update this if the server is on a different machine
+SERVER_PORT = 5555  # Port number for the TCP connection
+MAX_RETRIES = 5  # Maximum retries for decryption attempts
+EXPECTED_TEXT="The quick brown fox jumps over the lazy dog."
+FILE_NAME="generated.txt"
 
-SERVER_HOST = '127.0.0.1'
-SERVER_PORT = 5555
-BUFFER_SIZE = 2048
+def connect_to_server():
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client_socket.connect((SERVER_HOST, SERVER_PORT))
+    return client_socket
 
+def receive_total_size(client_socket):
+    return int(client_socket.recv(1024).decode())
 
+def process_crumb(crumb_idx, ciphertext, crumbs, attempted_crumbs, keys):
+    available_keys = [key for key in keys.keys() if key not in attempted_crumbs[crumb_idx]]
+    if not available_keys:
+        return False  # No available keys left for this crumb
 
-def aes_decrypt(ciphertext, key):
-    iv = ciphertext[:16]
-    actual_ciphertext = ciphertext[16:]
+    crumb = random.choice(available_keys)
+    key = keys[crumb]
+    attempted_crumbs[crumb_idx].append(key)
 
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-    decryptor = cipher.decryptor()
-
-    decrypted_data = decryptor.update(actual_ciphertext) + decryptor.finalize()
-
-    unpadder = padding.PKCS7(128).unpadder()
-    unpadded_data = unpadder.update(decrypted_data) + unpadder.finalize()
-
-    print(f"[DEBUG] Decrypting: IV={iv.hex()}, Ciphertext={actual_ciphertext.hex()}, Result={unpadded_data.decode()}")
-    return unpadded_data.decode()
-
-class Client:
-    def __init__(self):
-        self.decrypted_crumbs = {}  # Successfully decrypted crumbs
-        self.attempted_keys = {}    # Keys attempted for each index
-
-    def run(self):
+    attempts = 0
+    while attempts < MAX_RETRIES:
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-                client_socket.connect((SERVER_HOST, SERVER_PORT))
-                print("[INFO] Connected to server.")
+            decrypted_text = aes_decrypt(ciphertext, key)
+            if decrypted_text == EXPECTED_TEXT:  # Verify content
+                crumbs[crumb_idx] = crumb  # Store the decoded crumb
+                return True  # Successfully decoded
+        except:
+            pass  # Ignore decryption errors
 
-                total_crumbs = 0
-                while True:
-                    data = client_socket.recv(BUFFER_SIZE).decode('utf-8').strip()
-                    if not data:
-                        break
+        attempts += 1
 
-                    print(f"[DEBUG] Received data: {data}")
-                    if data.isdigit():
-                        total_crumbs = int(data)
-                        print(f"[INFO] Total crumbs to handle: {total_crumbs}")
-                        continue
+    return False
 
-                    if "|" in data:
-                        index, encrypted_crumb_hex = data.split("|")
-                        index = int(index)
-                        encrypted_crumb = bytes.fromhex(encrypted_crumb_hex)
+def decode_crumbs(client_socket, total_size, crumbs, attempted_crumbs, keys):
+    num_decoded = 0
 
-                        if index in self.decrypted_crumbs:
-                            client_socket.sendall(str(index).encode('utf-8'))
-                            continue
+    while num_decoded < total_size:
+        for crumb_idx in range(total_size):
+            if crumbs[crumb_idx] is not None:
+                continue  # Skip already decoded crumbs
 
-                        if index not in self.attempted_keys:
-                            self.attempted_keys[index] = set()
+            ciphertext = client_socket.recv(1024)  # Receive a chunk of encrypted data
+            if process_crumb(crumb_idx, ciphertext, crumbs, attempted_crumbs, keys):
+                num_decoded += 1  # Increment decoded count
 
-                        print(f"[DEBUG] Attempting to decrypt index {index}.")
+            # Send progress update to the server
+            progress = (num_decoded / total_size) * 100
+            progress = min(progress, 100)  # Ensure progress does not exceed 100%
+            client_socket.sendall(f"{progress:.2f}%".encode())
 
-                        for key in keys.values():
-                            if key in self.attempted_keys[index]:
-                                continue
+        print(f"Client progress: {progress:.2f}%")
 
-                            self.attempted_keys[index].add(key)
-                            try:
-                                decrypted_message = aes_decrypt(encrypted_crumb, key)
-                                print(f"[DEBUG] Decrypting with key={key.hex()}, Result={decrypted_message}")
+    return num_decoded
 
-                                if decrypted_message == str(index):
-                                    print(f"[INFO] Successfully decrypted crumb index {index}.")
-                                    self.decrypted_crumbs[index] = key
-                                    client_socket.sendall(str(index).encode('utf-8'))
-                                    break
-                            except Exception as e:
-                                print(f"[ERROR] Failed to decrypt index {index}: {e}")
+def validate_and_write_file(crumbs, total_size):
+    valid_crumbs = [crumb for crumb in crumbs if crumb is not None]
+    print(f"Decoded crumbs: {len(valid_crumbs)}/{total_size}")
 
-        except Exception as e:
-            print(f"[ERROR] Client encountered an exception: {e}")
+    if len(valid_crumbs) == total_size:
+        bytes_content = []
+        for i in range(0, len(valid_crumbs), 4):
+            chunk = valid_crumbs[i:i + 4]
+            if len(chunk) == 4:  # Ensure the chunk has 4 crumbs
+                bytes_content.append(recompose_byte(chunk))
+
+        with open(FILE_NAME, "wb") as output_file:
+            output_file.write(bytearray(bytes_content))
+        print("File successfully written: received_file.txt")
+    else:
+        print(f"[ERROR] Unable to decode all crumbs. Decoded: {len(valid_crumbs)}")
+
+def tcp_client():
+    try:
+        client_socket = connect_to_server()
+        with client_socket:
+            total_size = receive_total_size(client_socket)
+            crumbs = [None] * total_size  # Initialize an array to store decoded crumbs
+            attempted_crumbs = [[] for _ in range(total_size)]  # Track keys tried for each crumb index
+
+            print("Connected to the server. Receiving crumbs...")
+
+            num_decoded = decode_crumbs(client_socket, total_size, crumbs, attempted_crumbs, keys)
+
+            print("All crumbs have been processed.")
+
+            validate_and_write_file(crumbs, total_size)
+
+            # Display the final decoded message
+            decoded_message =EXPECTED_TEXT
+            print(f"Decoded message: {decoded_message}")
+
+    except Exception as e:
+        print(f"[ERROR] An unexpected error occurred: {e}")
 
 if __name__ == "__main__":
-    client = Client()
-    client.run()
+    tcp_client()
